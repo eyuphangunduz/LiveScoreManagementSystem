@@ -41,6 +41,31 @@ int main() {
 
 	cout << "Server is listening..." << endl;
 
+
+	sockaddr_in clientAddress{};
+	socklen_t clientAddressLength = sizeof(clientAddress);
+
+	cout << "Waiting for a client connection..." << endl;
+	int clientSocketFD = accept(serverSocketFD, (sockaddr*)&clientAddress, &clientAddressLength);
+
+	if (clientSocketFD < 0) {
+		cout << "Error: accept failed." << endl;
+		close(serverSocketFD);
+		return 1;
+	}
+
+	char clientIP[INET_ADDRSTRLEN];
+	inet_ntop(AF_INET, &clientAddress.sin_addr, clientIP, sizeof(clientIP));
+	cout << "Client connected: " << clientIP << endl;
+
+	string message = "Welcome to the Live Score server!\n";
+	send(clientSocketFD, message.c_str(), message.size(), 0);
+	cout << "Welcome message sent." << endl;
+
+	close(clientSocketFD);
+	cout << "Client disconnected." << endl;
+
+
 	close(serverSocketFD);
 	cout << "Socket closed." << endl;
 
