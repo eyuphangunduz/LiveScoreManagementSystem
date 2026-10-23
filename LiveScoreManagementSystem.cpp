@@ -7,15 +7,16 @@
 
 using namespace std;
 
-int main() {
-	cout << "Program started." << endl;
+const int PORT = 8080;
+
+void runServer() {
+	cout << "[SERVER] Starting..." << endl;
 
 	int serverSocketFD = socket(AF_INET, SOCK_STREAM, 0);
 	if (serverSocketFD < 0) {
-		cout << "Error: socket could not be created." << endl;
-		return 1;
+		cout << "[SERVER] Error: socket could not be created." << endl;
+		return;
 	}
-	cout << "Socket created. File descriptor: " << serverSocketFD << endl;
 
 	int opt = 1;
 	setsockopt(serverSocketFD, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -23,51 +24,80 @@ int main() {
 	sockaddr_in serverAddress{};
 	serverAddress.sin_family = AF_INET;
 	serverAddress.sin_addr.s_addr = INADDR_ANY;
-	serverAddress.sin_port = htons(8080);
+	serverAddress.sin_port = htons(PORT);
 
 	if (bind(serverSocketFD, (sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
-		cout << "Error: bind failed." << endl;
+		cout << "[SERVER] Error: bind failed." << endl;
 		close(serverSocketFD);
-		return 1;
+		return;
 	}
-
-	cout << "Socket bound to port 8080." << endl;
 
 	if (listen(serverSocketFD, 5) < 0) {
-		cout << "Error: listen failed." << endl;
+		cout << "[SERVER] Error: listen failed." << endl;
 		close(serverSocketFD);
-		return 1;
+		return;
 	}
-
-	cout << "Server is listening..." << endl;
-
+	cout << "[SERVER] Listening on port " << PORT << "..." << endl;
 
 	sockaddr_in clientAddress{};
 	socklen_t clientAddressLength = sizeof(clientAddress);
-
-	cout << "Waiting for a client connection..." << endl;
 	int clientSocketFD = accept(serverSocketFD, (sockaddr*)&clientAddress, &clientAddressLength);
-
 	if (clientSocketFD < 0) {
-		cout << "Error: accept failed." << endl;
+		cout << "[SERVER] Error: accept failed." << endl;
 		close(serverSocketFD);
-		return 1;
+		return;
 	}
 
 	char clientIP[INET_ADDRSTRLEN];
 	inet_ntop(AF_INET, &clientAddress.sin_addr, clientIP, sizeof(clientIP));
-	cout << "Client connected: " << clientIP << endl;
+	cout << "[SERVER] Client connected: " << clientIP << endl;
 
-	string message = "Welcome to the Live Score server!\n";
+	string message = "Welcome to the Live Score server!";
 	send(clientSocketFD, message.c_str(), message.size(), 0);
-	cout << "Welcome message sent." << endl;
+	cout << "[SERVER] Welcome message sent." << endl;
 
 	close(clientSocketFD);
-	cout << "Client disconnected." << endl;
-
-
 	close(serverSocketFD);
-	cout << "Socket closed." << endl;
+	cout << "[SERVER] Shut down." << endl;
+}
 
+void runClient() {
+	cout << "[CLIENT] Starting..." << endl;
+
+	// 1) Create a TCP socket
+	int sockFD = socket(AF_INET, SOCK_STREAM, 0);
+	if (sockFD < 0) {
+		cout << "[CLIENT] Error: socket could not be created." << endl;
+		return;
+	}
+
+	sockaddr_in serverAddress{};
+	serverAddress.sin_family = AF_INET;
+	serverAddress.sin_port = htons(PORT);
+	inet_pton(AF_INET, "127.0.0.1", &serverAddress.sin_addr);
+
+	if (connect(sockFD, (sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
+		cout << "[CLIENT] Error: could not connect to the server." << endl;
+		close(sockFD);
+		return;
+	}
+	cout << "[CLIENT] Connected to the server." << endl;
+
+	char buffer[1024];
+	ssize_t bytesReceived = recv(sockFD, buffer, sizeof(buffer) - 1, 0);
+	if (bytesReceived > 0) {
+		buffer[bytesReceived] = '\0';
+		cout << "[CLIENT] " << bytesReceived << " bytes received: " << buffer << endl;
+	}
+
+	close(sockFD);
+	cout << "[CLIENT] Disconnected." << endl;
+}
+
+int main(int argc, char* argv[]) {
+	if (argc > 1 && string(argv[1]) == "client")
+		runClient();
+	else
+		runServer();
 	return 0;
 }
