@@ -1,13 +1,44 @@
 ﻿#include "LiveScoreManagementSystem.h"
+#include "Packet.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <string>
+#include <vector>
+#include <iomanip>
+#include <sstream>
 
 using namespace std;
 
 const int PORT = 8080;
+
+
+bool sendAll(int socketFD, const uint8_t* data, size_t length) {
+	size_t totalSent = 0;
+	while (totalSent < length) {
+		ssize_t sent = send(socketFD, data + totalSent, length - totalSent, 0);
+		if (sent <= 0) return false;
+		totalSent += sent;
+	}
+	return true;
+}
+
+bool recvAll(int socketFD, uint8_t* buffer, size_t length) {
+	size_t totalReceived = 0;
+	while (totalReceived < length) {
+		ssize_t received = recv(socketFD, buffer + totalReceived, length - totalReceived, 0);
+		if (received <= 0) return false;
+		totalReceived += received;
+	}
+	return true;
+}
+
+string toHex(uint16_t value) {
+	stringstream ss;
+	ss << "0x" << hex << uppercase << setw(4) << setfill('0') << value;
+	return ss.str();
+}
 
 void runServer() {
 	cout << "[SERVER] Starting..." << endl;
@@ -52,9 +83,18 @@ void runServer() {
 	inet_ntop(AF_INET, &clientAddress.sin_addr, clientIP, sizeof(clientIP));
 	cout << "[SERVER] Client connected: " << clientIP << endl;
 
-	string message = "Welcome to the Live Score server!";
-	send(clientSocketFD, message.c_str(), message.size(), 0);
-	cout << "[SERVER] Welcome message sent." << endl;
+	Packet packet("Welcome to the Live Score server!");
+	vector<uint8_t> frame = packet.serialize();
+
+	cout << "[SERVER] Serialization: " << packet.payload.size() << "-byte payload constructed." << endl;
+	cout << "[SERVER] Checksum: Generated " << toHex(packet.checksum) << ", appended to frame." << endl;
+
+	if (sendAll(clientSocketFD, frame.data(), frame.size())) {
+		cout << "[SERVER] Network: Transmitted " << frame.size() << " bytes over TCP socket." << endl;
+	}
+	else {
+		cout << "[SERVER] Error: transmission failed." << endl;
+	}
 
 	close(clientSocketFD);
 	close(serverSocketFD);
@@ -64,7 +104,6 @@ void runServer() {
 void runClient() {
 	cout << "[CLIENT] Starting..." << endl;
 
-	// 1) Create a TCP socket
 	int sockFD = socket(AF_INET, SOCK_STREAM, 0);
 	if (sockFD < 0) {
 		cout << "[CLIENT] Error: socket could not be created." << endl;
@@ -83,11 +122,39 @@ void runClient() {
 	}
 	cout << "[CLIENT] Connected to the server." << endl;
 
-	char buffer[1024];
-	ssize_t bytesReceived = recv(sockFD, buffer, sizeof(buffer) - 1, 0);
-	if (bytesReceived > 0) {
-		buffer[bytesReceived] = '\0';
-		cout << "[CLIENT] " << bytesReceived << " bytes received: " << buffer << endl;
+	uint8_t header[4];
+	if (!recvAll(sockFD, header, 4)) {
+		cout << "[CLIENT] Error: could not read packet header." << endl;
+		close(sockFD);
+		return;
+	}
+	uint32_t payloadSize = (uint32_t(header[0]) << 24) | (uint32_t(header[1]) << 16)
+		| (uint32_t(header[2]) << 8) | uint32_t(header[3]);
+
+	if (payloadSize > 65536) {
+		cout << "[CLIENT] Error: invalid packet size." << endl;
+		close(sockFD);
+		return;
+	}
+
+	vector<uint8_t> rest(payloadSize + 2);
+	if (!recvAll(sockFD, rest.data(), rest.size())) {
+		cout << "[CLIENT] Error: could not read packet body." << endl;
+		close(sockFD);
+		return;
+	}
+	cout << "[CLIENT] Network: " << (4 + rest.size()) << " bytes received." << endl;
+
+	Packet packet;
+	packet.payload = string(rest.begin(), rest.begin() + payloadSize);
+	packet.checksum = (uint16_t(rest[payloadSize]) << 8) | uint16_t(rest[payloadSize + 1]);
+
+	if (packet.verifyChecksum()) {
+		cout << "[CLIENT] Integrity: Checksum verified (" << toHex(packet.checksum) << ")." << endl;
+		cout << "[CLIENT] Display: " << packet.payload << endl;
+	}
+	else {
+		cout << "[CLIENT] Integrity: Checksum MISMATCH! Packet discarded." << endl;
 	}
 
 	close(sockFD);
