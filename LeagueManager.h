@@ -1,6 +1,7 @@
 #pragma once
 #include "Team.h"
 #include "Match.h"
+#include "MatchSimulator.h"
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -94,5 +95,27 @@ public:
 			ss << teams[m.awayTeamIndex].name << "\n";
 		}
 		return ss.str();
+	}
+	bool playCurrentWeek(MatchSimulator& simulator, const MatchSimulator::EventCallback& onEvent) {
+		if (isSeasonFinished()) return false;
+
+		for (Match& m : matches) {
+			if (m.week != currentWeek || m.played) continue;
+
+			Team& home = teams[m.homeTeamIndex];
+			Team& away = teams[m.awayTeamIndex];
+
+			simulator.simulateMatch(m, home.name, away.name, onEvent);
+
+			home.updateStats(m.homeGoals, m.awayGoals);
+			away.updateStats(m.awayGoals, m.homeGoals);
+		}
+
+		currentWeek++;
+		return true;
+	}
+
+	bool isSeasonFinished() const {
+		return currentWeek > totalWeeks();
 	}
 };

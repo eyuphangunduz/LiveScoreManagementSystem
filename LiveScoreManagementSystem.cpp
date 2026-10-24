@@ -176,6 +176,23 @@ int main(int argc, char* argv[]) {
 		}
 		cout << league.standingsToString();
 	}
+	else if (mode == "simulate") {
+		LeagueManager league;
+		league.initialize();
+		MatchSimulator simulator;
+
+		while (!league.isSeasonFinished()) {
+			int week = league.currentWeek;
+			cout << "\n########## WEEK " << week << " ##########" << endl;
+
+			league.playCurrentWeek(simulator, [](const string& event) {
+				cout << event << endl;
+				});
+
+			cout << league.fixtureToString(week);
+		}
+		cout << league.standingsToString();
+	}
 	else {
 		runServer();
 	}
