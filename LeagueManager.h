@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <fstream>
 #include <numeric>
 #include <sstream>
 #include <iomanip>
@@ -117,5 +118,87 @@ public:
 
 	bool isSeasonFinished() const {
 		return currentWeek > totalWeeks();
+	}
+	bool saveToFile(const std::string& filename) const {
+		std::ofstream file(filename);
+		if (!file) return false;
+
+		file << "WEEK " << currentWeek << "\n";
+
+		for (const Team& t : teams) {
+			file << "TEAM " << t.name << " " << t.played << " " << t.won << " "
+				<< t.drawn << " " << t.lost << " " << t.goalsFor << " "
+				<< t.goalsAgainst << " " << t.points << "\n";
+		}
+
+		for (const Match& m : matches) {
+			file << "MATCH " << m.homeTeamIndex << " " << m.awayTeamIndex << " "
+				<< m.week << " " << m.homeGoals << " " << m.awayGoals << " "
+				<< (m.played ? 1 : 0) << "\n";
+		}
+		return true;
+	}
+
+	bool loadFromFile(const std::string& filename) {
+		std::ifstream file(filename);
+		if (!file) return false;
+
+		std::vector<Team> loadedTeams;
+		std::vector<Match> loadedMatches;
+		int loadedWeek = 1;
+		std::string tag;
+
+		while (file >> tag) {
+			if (tag == "WEEK") {
+				file >> loadedWeek;
+			}
+			else if (tag == "TEAM") {
+				Team t;
+				file >> t.name >> t.played >> t.won >> t.drawn >> t.lost
+					>> t.goalsFor >> t.goalsAgainst >> t.points;
+				loadedTeams.push_back(t);
+			}
+			else if (tag == "MATCH") {
+				Match m;
+				int playedFlag = 0;
+				file >> m.homeTeamIndex >> m.awayTeamIndex >> m.week
+					>> m.homeGoals >> m.awayGoals >> playedFlag;
+				m.played = (playedFlag == 1);
+				loadedMatches.push_back(m);
+			}
+			else {
+				return false;
+			}
+			if (file.fail()) return false;
+		}
+
+		int n = static_cast<int>(loadedTeams.size());
+		if (n < 2 || static_cast<int>(loadedMatches.size()) != n * (n - 1) / 2) return false;
+		for (const Match& m : loadedMatches) {
+			if (m.homeTeamIndex < 0 || m.homeTeamIndex >= n ||
+				m.awayTeamIndex < 0 || m.awayTeamIndex >= n) return false;
+		}
+
+		teams = loadedTeams;
+		matches = loadedMatches;
+		currentWeek = loadedWeek;
+		return true;
+	}
+
+	void loadOrInitialize(const std::string& filename) {
+		if (!loadFromFile(filename)) {
+			initialize();
+			saveToFile(filename);
+		}
+	}
+
+	void resetSeason() {
+		for (Team& t : teams) t.reset();
+		for (Match& m : matches) {
+			m.homeGoals = 0;
+			m.awayGoals = 0;
+			m.played = false;
+		}
+		currentWeek = 1;
 	}
 };

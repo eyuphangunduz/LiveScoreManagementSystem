@@ -14,6 +14,8 @@ using namespace std;
 
 const int PORT = 8080;
 
+const string DATA_FILE = "league_data.txt";
+
 
 bool sendAll(int socketFD, const uint8_t* data, size_t length) {
 	size_t totalSent = 0;
@@ -168,29 +170,42 @@ int main(int argc, char* argv[]) {
 	if (mode == "client") {
 		runClient();
 	}
-	else if (mode == "league") {
+	else if (mode == "week") {
 		LeagueManager league;
-		league.initialize();
-		for (int w = 1; w <= league.totalWeeks(); w++) {
-			cout << league.fixtureToString(w);
+		league.loadOrInitialize(DATA_FILE);
+
+		if (league.isSeasonFinished()) {
+			cout << "The season is finished. Run 'reset' to start a new season." << endl;
+			cout << league.standingsToString();
+			return 0;
 		}
+
+		int week = league.currentWeek;
+		MatchSimulator simulator;
+		league.playCurrentWeek(simulator, [](const string& event) {
+			cout << event << endl;
+			});
+
+		cout << league.fixtureToString(week);
+		cout << league.standingsToString();
+
+		if (league.saveToFile(DATA_FILE))
+			cout << "\nLeague saved to " << DATA_FILE << endl;
+		else
+			cout << "\nError: could not save " << DATA_FILE << endl;
+	}
+	else if (mode == "standings") {
+		LeagueManager league;
+		league.loadOrInitialize(DATA_FILE);
+		cout << "Next week: " << league.currentWeek << endl;
 		cout << league.standingsToString();
 	}
-	else if (mode == "simulate") {
+	else if (mode == "reset") {
 		LeagueManager league;
-		league.initialize();
-		MatchSimulator simulator;
-
-		while (!league.isSeasonFinished()) {
-			int week = league.currentWeek;
-			cout << "\n########## WEEK " << week << " ##########" << endl;
-
-			league.playCurrentWeek(simulator, [](const string& event) {
-				cout << event << endl;
-				});
-
-			cout << league.fixtureToString(week);
-		}
+		league.loadOrInitialize(DATA_FILE);
+		league.resetSeason();
+		league.saveToFile(DATA_FILE);
+		cout << "Season has been reset." << endl;
 		cout << league.standingsToString();
 	}
 	else {
