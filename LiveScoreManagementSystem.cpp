@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <csignal>
 #include <string>
 #include <vector>
 #include <iomanip>
@@ -13,7 +14,6 @@
 using namespace std;
 
 const int PORT = 8080;
-
 const string DATA_FILE = "league_data.txt";
 
 
@@ -43,8 +43,42 @@ string toHex(uint16_t value) {
 	return ss.str();
 }
 
+bool sendPacket(int socketFD, const string& message) {
+	Packet packet(message);
+	vector<uint8_t> frame = packet.serialize();
+	
+	size_t start = message.find_first_not_of('\n');
+	string preview = (start == string::npos) ? "" : message.substr(start, message.find('\n', start) - start);
+
+	cout << "[SERVER] Sent " << frame.size() << " bytes (checksum " << toHex(packet.checksum)
+		<< "): " << preview << endl;
+
+	return sendAll(socketFD, frame.data(), frame.size());
+}
+
+bool receivePacket(int socketFD, Packet& packet, size_t& totalBytes) {
+	uint8_t header[4];
+	if (!recvAll(socketFD, header, 4)) return false;
+
+	uint32_t payloadSize = (uint32_t(header[0]) << 24) | (uint32_t(header[1]) << 16)
+		| (uint32_t(header[2]) << 8) | uint32_t(header[3]);
+	if (payloadSize > 65536) return false;
+
+	vector<uint8_t> rest(payloadSize + 2);
+	if (!recvAll(socketFD, rest.data(), rest.size())) return false;
+
+	packet.payload = string(rest.begin(), rest.begin() + payloadSize);
+	packet.checksum = static_cast<uint16_t>((rest[payloadSize] << 8) | rest[payloadSize + 1]);
+	totalBytes = 4 + rest.size();
+	return true;
+}
+
 void runServer() {
 	cout << "[SERVER] Starting..." << endl;
+
+	LeagueManager league;
+	league.loadOrInitialize(DATA_FILE);
+	cout << "[SERVER] League loaded (next week: " << league.currentWeek << ")." << endl;
 
 	int serverSocketFD = socket(AF_INET, SOCK_STREAM, 0);
 	if (serverSocketFD < 0) {
@@ -86,23 +120,35 @@ void runServer() {
 	inet_ntop(AF_INET, &clientAddress.sin_addr, clientIP, sizeof(clientIP));
 	cout << "[SERVER] Client connected: " << clientIP << endl;
 
-	Packet packet("Welcome to the Live Score server!");
-	vector<uint8_t> frame = packet.serialize();
+	sendPacket(clientSocketFD, "Welcome to the Live Score server!");
 
-	cout << "[SERVER] Serialization: " << packet.payload.size() << "-byte payload constructed." << endl;
-	cout << "[SERVER] Checksum: Generated " << toHex(packet.checksum) << ", appended to frame." << endl;
-
-	if (sendAll(clientSocketFD, frame.data(), frame.size())) {
-		cout << "[SERVER] Network: Transmitted " << frame.size() << " bytes over TCP socket." << endl;
+	if (league.isSeasonFinished()) {
+		sendPacket(clientSocketFD, "The season is finished. Final standings:");
+		sendPacket(clientSocketFD, league.standingsToString());
 	}
 	else {
-		cout << "[SERVER] Error: transmission failed." << endl;
+		int week = league.currentWeek;
+		sendPacket(clientSocketFD, "========== WEEK " + to_string(week) + " - LIVE ==========");
+
+		MatchSimulator simulator;
+		simulator.minuteDelayMs = 50;  
+
+		league.playCurrentWeek(simulator, [&](const string& event) {
+			sendPacket(clientSocketFD, event);
+			});
+
+		sendPacket(clientSocketFD, league.fixtureToString(week));
+		sendPacket(clientSocketFD, league.standingsToString());
+
+		league.saveToFile(DATA_FILE);
+		cout << "[SERVER] League saved to " << DATA_FILE << endl;
 	}
 
 	close(clientSocketFD);
 	close(serverSocketFD);
 	cout << "[SERVER] Shut down." << endl;
 }
+
 
 void runClient() {
 	cout << "[CLIENT] Starting..." << endl;
@@ -125,74 +171,35 @@ void runClient() {
 	}
 	cout << "[CLIENT] Connected to the server." << endl;
 
-	uint8_t header[4];
-	if (!recvAll(sockFD, header, 4)) {
-		cout << "[CLIENT] Error: could not read packet header." << endl;
-		close(sockFD);
-		return;
-	}
-	uint32_t payloadSize = (uint32_t(header[0]) << 24) | (uint32_t(header[1]) << 16)
-		| (uint32_t(header[2]) << 8) | uint32_t(header[3]);
-
-	if (payloadSize > 65536) {
-		cout << "[CLIENT] Error: invalid packet size." << endl;
-		close(sockFD);
-		return;
-	}
-
-	vector<uint8_t> rest(payloadSize + 2);
-	if (!recvAll(sockFD, rest.data(), rest.size())) {
-		cout << "[CLIENT] Error: could not read packet body." << endl;
-		close(sockFD);
-		return;
-	}
-	cout << "[CLIENT] Network: " << (4 + rest.size()) << " bytes received." << endl;
-
 	Packet packet;
-	packet.payload = string(rest.begin(), rest.begin() + payloadSize);
-	packet.checksum = (uint16_t(rest[payloadSize]) << 8) | uint16_t(rest[payloadSize + 1]);
+	size_t bytes = 0;
+	int packetCount = 0;
+	int corruptedCount = 0;
 
-	if (packet.verifyChecksum()) {
-		cout << "[CLIENT] Integrity: Checksum verified (" << toHex(packet.checksum) << ")." << endl;
-		cout << "[CLIENT] Display: " << packet.payload << endl;
-	}
-	else {
-		cout << "[CLIENT] Integrity: Checksum MISMATCH! Packet discarded." << endl;
+	while (receivePacket(sockFD, packet, bytes)) {
+		packetCount++;
+		if (packet.verifyChecksum()) {
+			cout << packet.payload << endl;
+		}
+		else {
+			corruptedCount++;
+			cout << "[CLIENT] Checksum mismatch! Packet discarded." << endl;
+		}
 	}
 
 	close(sockFD);
-	cout << "[CLIENT] Disconnected." << endl;
+	cout << "\n[CLIENT] Connection closed. Packets received: " << packetCount
+		<< ", corrupted: " << corruptedCount << endl;
 }
 
+
 int main(int argc, char* argv[]) {
+	signal(SIGPIPE, SIG_IGN);  
+
 	string mode = (argc > 1) ? argv[1] : "server";
 
 	if (mode == "client") {
 		runClient();
-	}
-	else if (mode == "week") {
-		LeagueManager league;
-		league.loadOrInitialize(DATA_FILE);
-
-		if (league.isSeasonFinished()) {
-			cout << "The season is finished. Run 'reset' to start a new season." << endl;
-			cout << league.standingsToString();
-			return 0;
-		}
-
-		int week = league.currentWeek;
-		MatchSimulator simulator;
-		league.playCurrentWeek(simulator, [](const string& event) {
-			cout << event << endl;
-			});
-
-		cout << league.fixtureToString(week);
-		cout << league.standingsToString();
-
-		if (league.saveToFile(DATA_FILE))
-			cout << "\nLeague saved to " << DATA_FILE << endl;
-		else
-			cout << "\nError: could not save " << DATA_FILE << endl;
 	}
 	else if (mode == "standings") {
 		LeagueManager league;

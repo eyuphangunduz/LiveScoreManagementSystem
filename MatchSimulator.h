@@ -1,5 +1,7 @@
 #pragma once
 #include "Match.h"
+#include <thread>
+#include <chrono>
 #include <string>
 #include <random>
 #include <functional>
@@ -7,6 +9,8 @@
 class MatchSimulator {
 public:
 	using EventCallback = std::function<void(const std::string&)>;
+
+	int minuteDelayMs = 0;
 
 	MatchSimulator() : rng(std::random_device{}()) {}
 
@@ -18,6 +22,10 @@ public:
 		onEvent("[Kick-off] " + homeName + " vs " + awayName);
 
 		for (int minute = 1; minute <= 90; minute++) {
+			
+			if (minuteDelayMs > 0) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(minuteDelayMs));
+			}
 			simulateMinute(match, minute, homeName, awayName, onEvent);
 			if (minute == 45) {
 				onEvent("[Half-time] " + scoreLine(match, homeName, awayName));
