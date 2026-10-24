@@ -1,5 +1,6 @@
 ﻿#include "LiveScoreManagementSystem.h"
 #include "Packet.h"
+#include "LeagueManager.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -162,9 +163,21 @@ void runClient() {
 }
 
 int main(int argc, char* argv[]) {
-	if (argc > 1 && string(argv[1]) == "client")
+	string mode = (argc > 1) ? argv[1] : "server";
+
+	if (mode == "client") {
 		runClient();
-	else
+	}
+	else if (mode == "league") {
+		LeagueManager league;
+		league.initialize();
+		for (int w = 1; w <= league.totalWeeks(); w++) {
+			cout << league.fixtureToString(w);
+		}
+		cout << league.standingsToString();
+	}
+	else {
 		runServer();
+	}
 	return 0;
 }
