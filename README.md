@@ -37,32 +37,31 @@ any extra libraries. On **Windows**, use **WSL** (Windows Subsystem for Linux).
 
 ### Linux / WSL
 ```bash
-sudo apt install g++ cmake git
+sudo apt install g++ git
 git clone https://github.com/eyuphangunduz/LiveScoreManagementSystem.git
 cd LiveScoreManagementSystem
-cmake -B build
-cmake --build build
+g++ -std=c++20 LiveScoreManagementSystem.cpp -o LiveScoreManagementSystem
 ```
 
 ### macOS
 ```bash
 xcode-select --install          # C++ compiler (one-time)
-brew install cmake              # optional
 git clone https://github.com/eyuphangunduz/LiveScoreManagementSystem.git
 cd LiveScoreManagementSystem
-cmake -B build
-cmake --build build
+clang++ -std=c++20 LiveScoreManagementSystem.cpp -o LiveScoreManagementSystem
 ```
-
-### Without CMake (any platform)
-```bash
-g++ -std=c++20 LiveScoreManagementSystem.cpp -o LiveScoreManagementSystem
-```
-(Use `clang++` instead of `g++` on macOS.)
 
 ### Windows
 1. Open PowerShell as administrator and run `wsl --install`, then restart.
 2. Open **Ubuntu** and follow the Linux steps above.
+
+### Optional: CMake
+If CMake is installed, the project can also be built with:
+```bash
+cmake -B build
+cmake --build build
+```
+The program is then located at `./build/LiveScoreManagementSystem`.
 
 ---
 
@@ -72,15 +71,13 @@ Open **two terminals** in the project folder.
 
 **Terminal 1 — server**
 ```bash
-./build/LiveScoreManagementSystem server
+./LiveScoreManagementSystem server
 ```
 
 **Terminal 2 — client**
 ```bash
-./build/LiveScoreManagementSystem client
+./LiveScoreManagementSystem client
 ```
-
-(If you built without CMake, use `./LiveScoreManagementSystem` instead of `./build/LiveScoreManagementSystem`.)
 
 ### Client menu
 | Option | Action |
@@ -100,7 +97,7 @@ Transmission summary: 26 packets, 2 retransmissions, 0 lost.
 
 ### BER vs SNR experiment
 ```bash
-./build/LiveScoreManagementSystem ber
+./LiveScoreManagementSystem ber
 ```
 Sends 5000 packets through the noisy channel for every SNR value from 0 to 10 dB and prints the theoretical and measured
 BER, and how many corrupted packets the checksum detected:
