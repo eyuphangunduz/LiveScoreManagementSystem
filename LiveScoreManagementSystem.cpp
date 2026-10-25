@@ -15,6 +15,7 @@ using namespace std;
 
 const int PORT = 8080;
 const string DATA_FILE = "league_data.txt";
+const string END_OF_RESPONSE = "#END#";  
 
 
 bool sendAll(int socketFD, const uint8_t* data, size_t length) {
@@ -43,15 +44,16 @@ string toHex(uint16_t value) {
 	return ss.str();
 }
 
-bool sendPacket(int socketFD, const string& message) {
+bool sendPacket(int socketFD, const string& message, const string& role) {
 	Packet packet(message);
 	vector<uint8_t> frame = packet.serialize();
-	
-	size_t start = message.find_first_not_of('\n');
-	string preview = (start == string::npos) ? "" : message.substr(start, message.find('\n', start) - start);
 
-	cout << "[SERVER] Sent " << frame.size() << " bytes (checksum " << toHex(packet.checksum)
-		<< "): " << preview << endl;
+	if (message != END_OF_RESPONSE) {
+		size_t start = message.find_first_not_of('\n');
+		string preview = (start == string::npos) ? "" : message.substr(start, message.find('\n', start) - start);
+		cout << "[" << role << "] Sent " << frame.size() << " bytes (checksum "
+			<< toHex(packet.checksum) << "): " << preview << endl;
+	}
 
 	return sendAll(socketFD, frame.data(), frame.size());
 }
@@ -71,6 +73,77 @@ bool receivePacket(int socketFD, Packet& packet, size_t& totalBytes) {
 	packet.checksum = static_cast<uint16_t>((rest[payloadSize] << 8) | rest[payloadSize + 1]);
 	totalBytes = 4 + rest.size();
 	return true;
+}
+
+
+void handleClient(int clientSocketFD, LeagueManager& league) {
+	sendPacket(clientSocketFD, "Welcome to the Live Score server!", "SERVER");
+	sendPacket(clientSocketFD, END_OF_RESPONSE, "SERVER");
+
+	Packet request;
+	size_t bytes = 0;
+
+	while (receivePacket(clientSocketFD, request, bytes)) {
+		if (!request.verifyChecksum()) {
+			cout << "[SERVER] Corrupted request discarded." << endl;
+			sendPacket(clientSocketFD, "Error: your request was corrupted, please try again.", "SERVER");
+			sendPacket(clientSocketFD, END_OF_RESPONSE, "SERVER");
+			continue;
+		}
+
+		string command = request.payload;
+		cout << "[SERVER] Command received: " << command << " (" << bytes
+			<< " bytes, checksum " << toHex(request.checksum) << " verified)" << endl;
+
+		if (command == "PLAY") {
+			if (league.isSeasonFinished()) {
+				sendPacket(clientSocketFD, "The season is finished. Choose 'Reset season' to start a new one.", "SERVER");
+			}
+			else {
+				int week = league.currentWeek;
+				sendPacket(clientSocketFD, "========== WEEK " + to_string(week) + " - LIVE ==========", "SERVER");
+
+				MatchSimulator simulator;
+				simulator.minuteDelayMs = 50;
+
+				league.playCurrentWeek(simulator, [&](const string& event) {
+					sendPacket(clientSocketFD, event, "SERVER");
+					});
+
+				sendPacket(clientSocketFD, league.fixtureToString(week), "SERVER");
+				sendPacket(clientSocketFD, league.standingsToString(), "SERVER");
+
+				league.saveToFile(DATA_FILE);
+				cout << "[SERVER] League saved to " << DATA_FILE << endl;
+			}
+		}
+		else if (command == "STANDINGS") {
+			sendPacket(clientSocketFD, league.standingsToString(), "SERVER");
+		}
+		else if (command == "FIXTURE") {
+			if (league.isSeasonFinished())
+				sendPacket(clientSocketFD, "The season is finished. There are no more matches.", "SERVER");
+			else
+				sendPacket(clientSocketFD, league.fixtureToString(league.currentWeek), "SERVER");
+		}
+		else if (command == "RESET") {
+			league.resetSeason();
+			league.saveToFile(DATA_FILE);
+			cout << "[SERVER] Season reset and saved." << endl;
+			sendPacket(clientSocketFD, "Season has been reset. Starting again from week 1.", "SERVER");
+			sendPacket(clientSocketFD, league.standingsToString(), "SERVER");
+		}
+		else if (command == "EXIT") {
+			sendPacket(clientSocketFD, "Goodbye!", "SERVER");
+			sendPacket(clientSocketFD, END_OF_RESPONSE, "SERVER");
+			break;
+		}
+		else {
+			sendPacket(clientSocketFD, "Unknown command: " + command, "SERVER");
+		}
+
+		sendPacket(clientSocketFD, END_OF_RESPONSE, "SERVER");
+	}
 }
 
 void runServer() {
@@ -95,7 +168,7 @@ void runServer() {
 	serverAddress.sin_port = htons(PORT);
 
 	if (bind(serverSocketFD, (sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
-		cout << "[SERVER] Error: bind failed." << endl;
+		cout << "[SERVER] Error: bind failed. Is another server already running?" << endl;
 		close(serverSocketFD);
 		return;
 	}
@@ -105,50 +178,53 @@ void runServer() {
 		close(serverSocketFD);
 		return;
 	}
-	cout << "[SERVER] Listening on port " << PORT << "..." << endl;
+	cout << "[SERVER] Listening on port " << PORT << " (press Ctrl+C to stop)..." << endl;
 
-	sockaddr_in clientAddress{};
-	socklen_t clientAddressLength = sizeof(clientAddress);
-	int clientSocketFD = accept(serverSocketFD, (sockaddr*)&clientAddress, &clientAddressLength);
-	if (clientSocketFD < 0) {
-		cout << "[SERVER] Error: accept failed." << endl;
-		close(serverSocketFD);
-		return;
+	while (true) {
+		sockaddr_in clientAddress{};
+		socklen_t clientAddressLength = sizeof(clientAddress);
+		int clientSocketFD = accept(serverSocketFD, (sockaddr*)&clientAddress, &clientAddressLength);
+		if (clientSocketFD < 0) {
+			cout << "[SERVER] Error: accept failed." << endl;
+			continue;
+		}
+
+		char clientIP[INET_ADDRSTRLEN];
+		inet_ntop(AF_INET, &clientAddress.sin_addr, clientIP, sizeof(clientIP));
+		cout << "[SERVER] Client connected: " << clientIP << endl;
+
+		handleClient(clientSocketFD, league);
+
+		close(clientSocketFD);
+		cout << "[SERVER] Client disconnected: " << clientIP << endl;
+		cout << "[SERVER] Waiting for the next client..." << endl;
 	}
-
-	char clientIP[INET_ADDRSTRLEN];
-	inet_ntop(AF_INET, &clientAddress.sin_addr, clientIP, sizeof(clientIP));
-	cout << "[SERVER] Client connected: " << clientIP << endl;
-
-	sendPacket(clientSocketFD, "Welcome to the Live Score server!");
-
-	if (league.isSeasonFinished()) {
-		sendPacket(clientSocketFD, "The season is finished. Final standings:");
-		sendPacket(clientSocketFD, league.standingsToString());
-	}
-	else {
-		int week = league.currentWeek;
-		sendPacket(clientSocketFD, "========== WEEK " + to_string(week) + " - LIVE ==========");
-
-		MatchSimulator simulator;
-		simulator.minuteDelayMs = 50;  
-
-		league.playCurrentWeek(simulator, [&](const string& event) {
-			sendPacket(clientSocketFD, event);
-			});
-
-		sendPacket(clientSocketFD, league.fixtureToString(week));
-		sendPacket(clientSocketFD, league.standingsToString());
-
-		league.saveToFile(DATA_FILE);
-		cout << "[SERVER] League saved to " << DATA_FILE << endl;
-	}
-
-	close(clientSocketFD);
-	close(serverSocketFD);
-	cout << "[SERVER] Shut down." << endl;
 }
 
+
+bool readResponse(int socketFD) {
+	Packet packet;
+	size_t bytes = 0;
+
+	while (receivePacket(socketFD, packet, bytes)) {
+		if (!packet.verifyChecksum()) {
+			cout << "[CLIENT] Checksum mismatch! Packet discarded." << endl;
+			continue;
+		}
+		if (packet.payload == END_OF_RESPONSE) return true;
+		cout << packet.payload << endl;
+	}
+	return false;
+}
+void printMenu() {
+	cout << "\n===== LIVE SCORE SYSTEM =====" << endl;
+	cout << "1. Play next week (live)" << endl;
+	cout << "2. View league standings" << endl;
+	cout << "3. View next week's fixture" << endl;
+	cout << "4. Reset season" << endl;
+	cout << "5. Exit" << endl;
+	cout << "Choice: ";
+}
 
 void runClient() {
 	cout << "[CLIENT] Starting..." << endl;
@@ -171,52 +247,66 @@ void runClient() {
 	}
 	cout << "[CLIENT] Connected to the server." << endl;
 
-	Packet packet;
-	size_t bytes = 0;
-	int packetCount = 0;
-	int corruptedCount = 0;
+	if (!readResponse(sockFD)) {
+		cout << "[CLIENT] Error: no response from the server." << endl;
+		close(sockFD);
+		return;
+	}
 
-	while (receivePacket(sockFD, packet, bytes)) {
-		packetCount++;
-		if (packet.verifyChecksum()) {
-			cout << packet.payload << endl;
+	while (true) {
+		printMenu();
+
+		string choice;
+		if (!getline(cin, choice)) choice = "5";
+
+		string command;
+		if (choice == "1") command = "PLAY";
+		else if (choice == "2") command = "STANDINGS";
+		else if (choice == "3") command = "FIXTURE";
+		else if (choice == "4") {
+			cout << "Are you sure you want to reset the season? (y/n): ";
+			string answer;
+			getline(cin, answer);
+			if (answer != "y" && answer != "Y") {
+				cout << "Reset cancelled." << endl;
+				continue;
+			}
+			command = "RESET";
 		}
+		else if (choice == "5") command = "EXIT";
 		else {
-			corruptedCount++;
-			cout << "[CLIENT] Checksum mismatch! Packet discarded." << endl;
+			cout << "Invalid choice. Please enter a number from 1 to 5." << endl;
+			continue;
 		}
+
+		if (!sendPacket(sockFD, command, "CLIENT") || !readResponse(sockFD)) {
+			cout << "[CLIENT] Error: connection to the server was lost." << endl;
+			break;
+		}
+
+		if (command == "EXIT") break;
 	}
 
 	close(sockFD);
-	cout << "\n[CLIENT] Connection closed. Packets received: " << packetCount
-		<< ", corrupted: " << corruptedCount << endl;
+	cout << "[CLIENT] Disconnected." << endl;
 }
 
 
 int main(int argc, char* argv[]) {
-	signal(SIGPIPE, SIG_IGN);  
+	signal(SIGPIPE, SIG_IGN);   
 
 	string mode = (argc > 1) ? argv[1] : "server";
 
-	if (mode == "client") {
+	if (mode == "server") {
+		runServer();
+	}
+	else if (mode == "client") {
 		runClient();
 	}
-	else if (mode == "standings") {
-		LeagueManager league;
-		league.loadOrInitialize(DATA_FILE);
-		cout << "Next week: " << league.currentWeek << endl;
-		cout << league.standingsToString();
-	}
-	else if (mode == "reset") {
-		LeagueManager league;
-		league.loadOrInitialize(DATA_FILE);
-		league.resetSeason();
-		league.saveToFile(DATA_FILE);
-		cout << "Season has been reset." << endl;
-		cout << league.standingsToString();
-	}
 	else {
-		runServer();
+		cout << "Unknown mode: " << mode << endl;
+		cout << "Usage: LiveScoreManagementSystem [server | client]" << endl;
+		return 1;
 	}
 	return 0;
 }
