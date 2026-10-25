@@ -16,7 +16,9 @@ using namespace std;
 
 const int PORT = 8080;
 const string DATA_FILE = "league_data.txt";
-const string END_OF_RESPONSE = "#END#";  
+const string END_OF_RESPONSE = "#END#";     
+const int MAX_RETRANSMISSIONS = 20;        
+const size_t HEADER_SIZE = 4;              
 
 
 bool sendAll(int socketFD, const uint8_t* data, size_t length) {
@@ -45,17 +47,21 @@ string toHex(uint16_t value) {
 	return ss.str();
 }
 
+string firstLine(const string& message) {
+	size_t start = message.find_first_not_of('\n');
+	if (start == string::npos) return "";
+	return message.substr(start, message.find('\n', start) - start);
+}
+
 bool sendPacket(int socketFD, const string& message, const string& role) {
 	Packet packet(message);
 	vector<uint8_t> frame = packet.serialize();
 
-	if (message != END_OF_RESPONSE) {
-		size_t start = message.find_first_not_of('\n');
-		string preview = (start == string::npos) ? "" : message.substr(start, message.find('\n', start) - start);
+	bool isControl = (message == END_OF_RESPONSE || message == "ACK" || message == "NACK");
+	if (!isControl) {
 		cout << "[" << role << "] Sent " << frame.size() << " bytes (checksum "
-			<< toHex(packet.checksum) << "): " << preview << endl;
+			<< toHex(packet.checksum) << "): " << firstLine(message) << endl;
 	}
-
 	return sendAll(socketFD, frame.data(), frame.size());
 }
 
@@ -77,9 +83,59 @@ bool receivePacket(int socketFD, Packet& packet, size_t& totalBytes) {
 }
 
 
+struct TransmissionStats {
+	int packets = 0;           
+	int retransmissions = 0;  
+	int lost = 0;              
+};
+
+bool sendReliable(int socketFD, const string& message, NoisyChannel& channel, TransmissionStats& stats) {
+	Packet packet(message);
+	vector<uint8_t> original = packet.serialize();
+	stats.packets++;
+
+	if (message != END_OF_RESPONSE) {
+		cout << "[SERVER] Sent " << original.size() << " bytes (checksum "
+			<< toHex(packet.checksum) << "): " << firstLine(message) << endl;
+	}
+
+	for (int attempt = 0; attempt <= MAX_RETRANSMISSIONS; attempt++) {
+		vector<uint8_t> frame = original;
+		int flipped = channel.transmit(frame, HEADER_SIZE);
+		if (flipped > 0) {
+			cout << "[SERVER]   Noise flipped " << flipped << " bit(s) in transit" << endl;
+		}
+
+		if (!sendAll(socketFD, frame.data(), frame.size())) return false;
+
+		Packet reply;
+		size_t bytes = 0;
+		if (!receivePacket(socketFD, reply, bytes)) return false;
+
+		if (reply.payload == "ACK") return true;
+
+		if (attempt < MAX_RETRANSMISSIONS) {
+			stats.retransmissions++;
+			cout << "[SERVER]   NACK received -> retransmitting (retry " << attempt + 1 << ")" << endl;
+		}
+	}
+
+	stats.lost++;
+	cout << "[SERVER]   Packet lost: gave up after " << MAX_RETRANSMISSIONS << " retransmissions." << endl;
+	return true;
+}
+
+
 void handleClient(int clientSocketFD, LeagueManager& league) {
-	sendPacket(clientSocketFD, "Welcome to the Live Score server!", "SERVER");
-	sendPacket(clientSocketFD, END_OF_RESPONSE, "SERVER");
+	NoisyChannel channel(100.0);   
+	TransmissionStats stats;
+
+	auto send = [&](const string& message) {
+		return sendReliable(clientSocketFD, message, channel, stats);
+		};
+
+	send("Welcome to the Live Score server!");
+	send(END_OF_RESPONSE);
 
 	Packet request;
 	size_t bytes = 0;
@@ -87,8 +143,8 @@ void handleClient(int clientSocketFD, LeagueManager& league) {
 	while (receivePacket(clientSocketFD, request, bytes)) {
 		if (!request.verifyChecksum()) {
 			cout << "[SERVER] Corrupted request discarded." << endl;
-			sendPacket(clientSocketFD, "Error: your request was corrupted, please try again.", "SERVER");
-			sendPacket(clientSocketFD, END_OF_RESPONSE, "SERVER");
+			send("Error: your request was corrupted, please try again.");
+			send(END_OF_RESPONSE);
 			continue;
 		}
 
@@ -96,54 +152,87 @@ void handleClient(int clientSocketFD, LeagueManager& league) {
 		cout << "[SERVER] Command received: " << command << " (" << bytes
 			<< " bytes, checksum " << toHex(request.checksum) << " verified)" << endl;
 
+		stats = TransmissionStats();
+
 		if (command == "PLAY") {
 			if (league.isSeasonFinished()) {
-				sendPacket(clientSocketFD, "The season is finished. Choose 'Reset season' to start a new one.", "SERVER");
+				send("The season is finished. Choose 'Reset season' to start a new one.");
 			}
 			else {
 				int week = league.currentWeek;
-				sendPacket(clientSocketFD, "========== WEEK " + to_string(week) + " - LIVE ==========", "SERVER");
+				send("========== WEEK " + to_string(week) + " - LIVE ==========");
 
 				MatchSimulator simulator;
 				simulator.minuteDelayMs = 50;
 
 				league.playCurrentWeek(simulator, [&](const string& event) {
-					sendPacket(clientSocketFD, event, "SERVER");
+					send(event);
 					});
 
-				sendPacket(clientSocketFD, league.fixtureToString(week), "SERVER");
-				sendPacket(clientSocketFD, league.standingsToString(), "SERVER");
+				send(league.fixtureToString(week));
+				send(league.standingsToString());
 
 				league.saveToFile(DATA_FILE);
 				cout << "[SERVER] League saved to " << DATA_FILE << endl;
+
+				send("Transmission summary: " + to_string(stats.packets) + " packets, "
+					+ to_string(stats.retransmissions) + " retransmissions, "
+					+ to_string(stats.lost) + " lost.");
 			}
 		}
 		else if (command == "STANDINGS") {
-			sendPacket(clientSocketFD, league.standingsToString(), "SERVER");
+			send(league.standingsToString());
 		}
 		else if (command == "FIXTURE") {
 			if (league.isSeasonFinished())
-				sendPacket(clientSocketFD, "The season is finished. There are no more matches.", "SERVER");
+				send("The season is finished. There are no more matches.");
 			else
-				sendPacket(clientSocketFD, league.fixtureToString(league.currentWeek), "SERVER");
+				send(league.fixtureToString(league.currentWeek));
 		}
 		else if (command == "RESET") {
 			league.resetSeason();
 			league.saveToFile(DATA_FILE);
 			cout << "[SERVER] Season reset and saved." << endl;
-			sendPacket(clientSocketFD, "Season has been reset. Starting again from week 1.", "SERVER");
-			sendPacket(clientSocketFD, league.standingsToString(), "SERVER");
+			send("Season has been reset. Starting again from week 1.");
+			send(league.standingsToString());
+		}
+		else if (command.rfind("SNR ", 0) == 0) { 
+			string value = command.substr(4);
+			if (value == "off" || value == "OFF") {
+				channel.setSnrDb(100.0);
+				cout << "[SERVER] Channel noise disabled." << endl;
+				send("Noise disabled: the channel is now error-free.");
+			}
+			else {
+				try {
+					double snr = stod(value);
+					if (snr < 5 || snr > 30) {
+						send("Please enter an SNR between 5 and 30 dB.");
+					}
+					else {
+						channel.setSnrDb(snr);
+						stringstream ss;
+						ss << "Channel SNR set to " << snr << " dB (theoretical BER "
+							<< scientific << setprecision(2) << channel.theoreticalBER() << ").";
+						cout << "[SERVER] " << ss.str() << endl;
+						send(ss.str());
+					}
+				}
+				catch (...) {
+					send("Invalid SNR value: " + value);
+				}
+			}
 		}
 		else if (command == "EXIT") {
-			sendPacket(clientSocketFD, "Goodbye!", "SERVER");
-			sendPacket(clientSocketFD, END_OF_RESPONSE, "SERVER");
+			send("Goodbye!");
+			send(END_OF_RESPONSE);
 			break;
 		}
 		else {
-			sendPacket(clientSocketFD, "Unknown command: " + command, "SERVER");
+			send("Unknown command: " + command);
 		}
 
-		sendPacket(clientSocketFD, END_OF_RESPONSE, "SERVER");
+		send(END_OF_RESPONSE);
 	}
 }
 
@@ -202,28 +291,35 @@ void runServer() {
 	}
 }
 
-
 bool readResponse(int socketFD) {
 	Packet packet;
 	size_t bytes = 0;
 
 	while (receivePacket(socketFD, packet, bytes)) {
 		if (!packet.verifyChecksum()) {
-			cout << "[CLIENT] Checksum mismatch! Packet discarded." << endl;
+			cout << "[CLIENT] Checksum mismatch (received " << toHex(packet.checksum)
+				<< ", calculated " << toHex(Packet::calculateChecksum(packet.payload))
+				<< ") -> NACK, requesting retransmission" << endl;
+			if (!sendPacket(socketFD, "NACK", "CLIENT")) return false;
 			continue;
 		}
+
+		if (!sendPacket(socketFD, "ACK", "CLIENT")) return false;
+
 		if (packet.payload == END_OF_RESPONSE) return true;
 		cout << packet.payload << endl;
 	}
-	return false;
+	return false;   // Connection was closed
 }
+
 void printMenu() {
 	cout << "\n===== LIVE SCORE SYSTEM =====" << endl;
 	cout << "1. Play next week (live)" << endl;
 	cout << "2. View league standings" << endl;
 	cout << "3. View next week's fixture" << endl;
 	cout << "4. Reset season" << endl;
-	cout << "5. Exit" << endl;
+	cout << "5. Set channel SNR (noise)" << endl;
+	cout << "6. Exit" << endl;
 	cout << "Choice: ";
 }
 
@@ -258,7 +354,7 @@ void runClient() {
 		printMenu();
 
 		string choice;
-		if (!getline(cin, choice)) choice = "5";
+		if (!getline(cin, choice)) choice = "6";
 
 		string command;
 		if (choice == "1") command = "PLAY";
@@ -274,9 +370,15 @@ void runClient() {
 			}
 			command = "RESET";
 		}
-		else if (choice == "5") command = "EXIT";
+		else if (choice == "5") {
+			cout << "Enter SNR in dB (5-30), or 'off' for a perfect channel: ";
+			string value;
+			getline(cin, value);
+			command = "SNR " + value;
+		}
+		else if (choice == "6") command = "EXIT";
 		else {
-			cout << "Invalid choice. Please enter a number from 1 to 5." << endl;
+			cout << "Invalid choice. Please enter a number from 1 to 6." << endl;
 			continue;
 		}
 
@@ -294,7 +396,6 @@ void runClient() {
 
 void runBerExperiment() {
 	const int PACKETS_PER_SNR = 5000;
-	const size_t HEADER_SIZE = 4;
 
 	Packet sample("[Minute 18'] GOAL! Galatasaray 1 - 0 Fenerbahce  (Galatasaray)");
 	vector<uint8_t> original = sample.serialize();
@@ -336,7 +437,7 @@ void runBerExperiment() {
 }
 
 int main(int argc, char* argv[]) {
-	signal(SIGPIPE, SIG_IGN);
+	signal(SIGPIPE, SIG_IGN);   
 
 	string mode = (argc > 1) ? argv[1] : "server";
 
