@@ -12,7 +12,7 @@ endif()
 project ("LiveScoreManagementSystem")
 
 # Kaynağı bu projenin yürütülebilir dosyasına ekleyin.
-add_executable (LiveScoreManagementSystem "LiveScoreManagementSystem.cpp" "LiveScoreManagementSystem.h" "Packet.h" "Team.h" "Match.h" "LeagueManager.h" "MatchSimulator.h")
+add_executable (LiveScoreManagementSystem "LiveScoreManagementSystem.cpp" "LiveScoreManagementSystem.h" "Packet.h" "Team.h" "Match.h" "LeagueManager.h" "MatchSimulator.h" "NoisyChannel.h")
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET LiveScoreManagementSystem PROPERTY CXX_STANDARD 20)

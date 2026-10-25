@@ -1,6 +1,7 @@
 ﻿#include "LiveScoreManagementSystem.h"
 #include "Packet.h"
 #include "LeagueManager.h"
+#include "NoisyChannel.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -291,9 +292,51 @@ void runClient() {
 	cout << "[CLIENT] Disconnected." << endl;
 }
 
+void runBerExperiment() {
+	const int PACKETS_PER_SNR = 5000;
+	const size_t HEADER_SIZE = 4;
+
+	Packet sample("[Minute 18'] GOAL! Galatasaray 1 - 0 Fenerbahce  (Galatasaray)");
+	vector<uint8_t> original = sample.serialize();
+	size_t bitsPerPacket = (original.size() - HEADER_SIZE) * 8;
+
+	cout << "\n===== BER vs SNR EXPERIMENT (BPSK, " << PACKETS_PER_SNR << " packets per SNR) =====\n";
+	cout << left << setw(10) << "SNR(dB)" << setw(16) << "Theoretical BER"
+		<< setw(14) << "Measured BER" << setw(12) << "Corrupted"
+		<< setw(10) << "Detected" << "Undetected\n";
+
+	for (int snrDb = 0; snrDb <= 10; snrDb++) {
+		NoisyChannel channel(snrDb);
+		long long totalBitErrors = 0;
+		int corrupted = 0, detected = 0, undetected = 0;
+
+		for (int i = 0; i < PACKETS_PER_SNR; i++) {
+			vector<uint8_t> frame = original;
+			int flipped = channel.transmit(frame, HEADER_SIZE);
+			totalBitErrors += flipped;
+			if (flipped == 0) continue;
+
+			corrupted++;
+
+			Packet received;
+			received.payload = string(frame.begin() + HEADER_SIZE, frame.end() - 2);
+			received.checksum = static_cast<uint16_t>((frame[frame.size() - 2] << 8) | frame.back());
+
+			if (received.verifyChecksum()) undetected++;
+			else detected++;
+		}
+
+		double measuredBer = double(totalBitErrors) / (double(PACKETS_PER_SNR) * bitsPerPacket);
+
+		cout << left << setw(10) << snrDb
+			<< scientific << setprecision(2) << setw(16) << channel.theoreticalBER()
+			<< setw(14) << measuredBer << defaultfloat
+			<< setw(12) << corrupted << setw(10) << detected << undetected << "\n";
+	}
+}
 
 int main(int argc, char* argv[]) {
-	signal(SIGPIPE, SIG_IGN);   
+	signal(SIGPIPE, SIG_IGN);
 
 	string mode = (argc > 1) ? argv[1] : "server";
 
@@ -303,9 +346,12 @@ int main(int argc, char* argv[]) {
 	else if (mode == "client") {
 		runClient();
 	}
+	else if (mode == "ber") {
+		runBerExperiment();
+	}
 	else {
 		cout << "Unknown mode: " << mode << endl;
-		cout << "Usage: LiveScoreManagementSystem [server | client]" << endl;
+		cout << "Usage: LiveScoreManagementSystem [server | client | ber]" << endl;
 		return 1;
 	}
 	return 0;
